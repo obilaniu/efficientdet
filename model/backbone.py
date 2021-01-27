@@ -13,24 +13,29 @@ class EfficientNet(nn.Module):
         del model._bn1, model._conv_head, model._fc
         del model._avg_pooling, model._dropout
         self.model = model
+        self.drop_connect_rate = model._global_params.drop_connect_rate
 
     def forward(self, x):
         x = self.model._swish(self.model._bn0(self.model._conv_stem(x)))
 
+        execute_next_block_check = False
         features = []
         for idx, block in enumerate(self.model._blocks):
-            drop_connect_rate = self.model._global_params.drop_connect_rate
+            if execute_next_block_check:
+                execute_next_block_check = False
+                if block._depthwise_conv.stride == [2, 2]:
+                    features.append(x)
+            
+            drop_connect_rate = self.drop_connect_rate
             if drop_connect_rate:
                 drop_connect_rate *= float(idx) / len(self.model._blocks)
             x = block(x, drop_connect_rate=drop_connect_rate)
 
             if idx == len(self.model._blocks) - 1:
                 features.append(x)
-
+                execute_next_block_check = False
             else:
-                next_block = self.model._blocks[idx + 1]
-                if next_block._depthwise_conv.stride == [2, 2]:
-                    features.append(x)
+                execute_next_block_check = True
 
         return features[2:]
 

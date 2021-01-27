@@ -28,6 +28,10 @@ class MBConvBlock(nn.Module):
     def __init__(self, block_args, global_params):
         super().__init__()
         self._block_args = block_args
+        self.expand_ratio = self._block_args.expand_ratio
+        self.input_filters = self._block_args.input_filters
+        self.output_filters = self._block_args.output_filters
+        self.stride = self._block_args.stride
         self._bn_mom = 1 - global_params.batch_norm_momentum
         self._bn_eps = global_params.batch_norm_epsilon
         self.has_se = (self._block_args.se_ratio is not None) and (
@@ -74,7 +78,7 @@ class MBConvBlock(nn.Module):
                                    momentum=self._bn_mom, eps=self._bn_eps)
         self._swish = MemoryEfficientSwish()
 
-    def forward(self, inputs, drop_connect_rate=None):
+    def forward(self, inputs, drop_connect_rate: float=0):
         """
         :param inputs: input tensor
         :param drop_connect_rate: drop connect rate (float, between 0 and 1)
@@ -83,7 +87,7 @@ class MBConvBlock(nn.Module):
 
         # Expansion and Depthwise Convolution
         x = inputs
-        if self._block_args.expand_ratio != 1:
+        if hasattr(self, "_bn0"):
             x = self._swish(self._bn0(self._expand_conv(inputs)))
         x = self._swish(self._bn1(self._depthwise_conv(x)))
 
@@ -97,8 +101,8 @@ class MBConvBlock(nn.Module):
         x = self._bn2(self._project_conv(x))
 
         # Skip connection and drop connect
-        input_filters, output_filters = self._block_args.input_filters, self._block_args.output_filters
-        if self.id_skip and self._block_args.stride == 1 and input_filters == output_filters:
+        input_filters, output_filters = self.input_filters, self.output_filters
+        if self.id_skip and self.stride == 1 and input_filters == output_filters:
             if drop_connect_rate:
                 x = drop_connect(x, p=drop_connect_rate, training=self.training)
             x = x + inputs  # skip connection
@@ -125,6 +129,7 @@ class EfficientNet(nn.Module):
         assert len(blocks_args) > 0, 'block args must be greater than 0'
         self._global_params = global_params
         self._blocks_args = blocks_args
+        self.drop_connect_rate = global_params.drop_connect_rate
 
         # Get static or dynamic convolution depending on image size
         Conv2d = get_same_padding_conv2d(image_size=global_params.image_size)
@@ -193,12 +198,13 @@ class EfficientNet(nn.Module):
 
         # Blocks
         for idx, block in enumerate(self._blocks):
-            drop_connect_rate = self._global_params.drop_connect_rate
+            drop_connect_rate = self.drop_connect_rate
             if drop_connect_rate:
                 drop_connect_rate *= float(idx) / len(self._blocks)
             x = block(x, drop_connect_rate=drop_connect_rate)
 
         # Head
+        assert hasattr(self, "_bn1")
         x = self._swish(self._bn1(self._conv_head(x)))
 
         return x
@@ -210,6 +216,7 @@ class EfficientNet(nn.Module):
         x = self.extract_features(inputs)
 
         # Pooling and final linear layer
+        assert hasattr(self, "_avg_pooling")
         x = self._avg_pooling(x)
         x = x.view(bs, -1)
         x = self._dropout(x)

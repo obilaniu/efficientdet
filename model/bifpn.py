@@ -6,6 +6,8 @@ from model.efficientnet.utils import MemoryEfficientSwish as Swish
 from model.module import DepthWiseSeparableConvModule as DWSConv
 from model.module import MaxPool2dSamePad
 
+from typing import List
+tensorlist = List[torch.Tensor]
 
 class BiFPN(nn.Module):
     """
@@ -16,10 +18,12 @@ class BiFPN(nn.Module):
     """
 
     EPS: float = 1e-04
-    REDUCTION_RATIO: int = 2
+    REDUCTION_RATIO: float = 2
 
     def __init__(self, n_channels):
         super(BiFPN, self).__init__()
+        self.EPS=self.EPS
+        self.REDUCTION_RATIO=self.REDUCTION_RATIO
 
         self.conv_4_td = DWSConv(n_channels, n_channels, relu=False)
         self.conv_5_td = DWSConv(n_channels, n_channels, relu=False)
@@ -41,12 +45,15 @@ class BiFPN(nn.Module):
         self.weights_6_out = nn.Parameter(torch.ones(3))
         self.weights_7_out = nn.Parameter(torch.ones(2))
 
-        self.upsample = lambda x: F.interpolate(x, scale_factor=self.REDUCTION_RATIO)
+        #self.upsample = lambda x: F.interpolate(x, scale_factor=self.REDUCTION_RATIO)
         self.downsample = MaxPool2dSamePad(self.REDUCTION_RATIO + 1, self.REDUCTION_RATIO)
 
         self.act = Swish()
+    
+    def upsample(self, x):
+        return F.interpolate(x, scale_factor=self.REDUCTION_RATIO)
 
-    def forward(self, features):
+    def forward(self, features: tensorlist):
         if len(features) == 5:
             p_3, p_4, p_5, p_6, p_7 = features
             p_4_2, p_5_2 = None, None
@@ -110,9 +117,16 @@ class BiFPN(nn.Module):
 
         return [p_3_out, p_4_out, p_5_out, p_6_out, p_7_out]
 
-    def _fuse_features(self, weights, features):
+    def _fuse_features(self, weights: torch.Tensor, features: tensorlist):
+        #weights = F.relu(weights)
+        #num = sum([w * f for w, f in zip(weights, features)])
+        #det = sum(weights) + self.EPS
+        #x = self.act(num / det)
+        #return x
         weights = F.relu(weights)
-        num = sum([w * f for w, f in zip(weights, features)])
-        det = sum(weights) + self.EPS
+        num = torch.zeros_like(weights[0]*features[0])
+        for w,f in zip(weights, features):
+            num += w*f
+        det = weights.sum() + self.EPS
         x = self.act(num / det)
         return x

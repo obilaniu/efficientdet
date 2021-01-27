@@ -6,6 +6,9 @@ import torch.nn.functional as F
 
 from model.efficientnet.utils import MemoryEfficientSwish as Swish
 
+from typing import List
+tensorlist = List[torch.Tensor]
+
 
 class ConvModule(nn.Module):
     """ Regular Convolution with BatchNorm """
@@ -58,6 +61,7 @@ class MaxPool2dSamePad(nn.MaxPool2d):
         stride = (stride, stride)
         padding = (padding, padding)
         dilation = (dilation, dilation)
+        self.PAD_VALUE = self.PAD_VALUE
 
         super(MaxPool2dSamePad, self).__init__(kernel_size, stride, padding,
                                                dilation, ceil_mode, count_include_pad)
@@ -99,19 +103,25 @@ class ChannelAdjuster(nn.Module):
         )
         self.p6_to_p7 = MaxPool2dSamePad(3, 2)
 
-    def forward(self, features):
+    def forward(self, features: tensorlist) -> tensorlist:
         """ param: features: a list of P3, P4, P5 feature maps from backbone
             returns: outs: P3, P4, P4_2, P5, P5_2, P6, P7 feature maps """
+        #outs = []
+        #conv_idx = 0
+        #for feature in features:
+        #    outs.append(self.convs[conv_idx](feature))
+        #
+        #    if conv_idx > 0:
+        #        conv_idx += 1
+        #        outs.append(self.convs[conv_idx](feature))
+        #
+        #    conv_idx += 1
         outs = []
-        conv_idx = 0
-        for feature in features:
-            outs.append(self.convs[conv_idx](feature))
-
-            if conv_idx > 0:
-                conv_idx += 1
-                outs.append(self.convs[conv_idx](feature))
-
-            conv_idx += 1
+        for i, conv in enumerate(self.convs):
+            if i==0:
+                outs.append(conv(features[0]))
+            else:
+                outs.append(conv(features[1+(i-1)//2]))
 
         outs.append(self.p5_to_p6(features[-1]))
         outs.append(self.p6_to_p7(outs[-1]))

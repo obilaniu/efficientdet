@@ -13,6 +13,9 @@ from model.module import ChannelAdjuster
 from utils.utils import check_model_name, download_model_weights
 from utils.tools import variance_scaling_
 
+from typing import List
+tensorlist = List[torch.Tensor]
+
 
 class EfficientDet(nn.Module):
     def __init__(self, name):
@@ -23,7 +26,7 @@ class EfficientDet(nn.Module):
 
         self.adjuster = ChannelAdjuster(self.backbone.get_channels_list(),
                                         cfg.MODEL.W_BIFPN)
-        self.bifpn = nn.Sequential(*[BiFPN(cfg.MODEL.W_BIFPN)
+        self.bifpn = nn.ModuleList([BiFPN(cfg.MODEL.W_BIFPN)
                                      for _ in range(cfg.MODEL.D_BIFPN)])
 
         self.regresser = HeadNet(n_features=cfg.MODEL.W_BIFPN,
@@ -38,8 +41,10 @@ class EfficientDet(nn.Module):
         features = self.backbone(x)
 
         features = self.adjuster(features)
-        features = self.bifpn(features)
-
+        #features = self.bifpn(features)
+        for bifpnmod in self.bifpn:
+            features = bifpnmod(features)
+        
         cls_outputs = self.classifier(features)
         box_outputs = self.regresser(features)
 

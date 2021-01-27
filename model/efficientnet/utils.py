@@ -51,8 +51,8 @@ class SwishImplementation(torch.autograd.Function):
 
 class MemoryEfficientSwish(nn.Module):
     def forward(self, x):
-        return SwishImplementation.apply(x)
-
+        return x * torch.sigmoid(x)
+        #return SwishImplementation.apply(x)
 
 class Swish(nn.Module):
     def forward(self, x):
@@ -82,7 +82,7 @@ def round_repeats(repeats, global_params):
     return int(math.ceil(multiplier * repeats))
 
 
-def drop_connect(inputs, p, training):
+def drop_connect(inputs, p: float, training: bool):
     """ Drop connect. """
     if not training: return inputs
     batch_size = inputs.shape[0]

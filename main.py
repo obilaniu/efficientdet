@@ -2,6 +2,7 @@ import argparse
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
+import torch.utils.mobile_optimizer
 
 import config as cfg
 from dataloader import get_loader
@@ -90,6 +91,22 @@ def main(args):
                 ema_decay.resume(model)
 
     elif args.mode == 'eval':
+        model.eval()
+        #model.to(memory_format=torch.channels_last)
+        with torch.no_grad():
+            model = torch.jit.script(model)
+            #model = torch.utils.mobile_optimizer.optimize_for_mobile(model)
+            #model(torch.randn((1,3,896,896)))
+        import sys, time
+        #N = 16
+        #t =- time.time()
+        #with torch.no_grad():
+        #    for _ in range(N):
+        #        model(torch.randn((1,3,896,896)))
+        #t += time.time()
+        #print(t/N)
+        #sys.exit(0)
+        import pdb; pdb.set_trace()
         validate(model, device)
 
 
