@@ -1,12 +1,14 @@
 import argparse
+import pdb, os, sys, time
 
 import torch
+import torchvision
 from torch.utils.tensorboard import SummaryWriter
 
 import config as cfg
 from dataloader import get_loader
 from log.logger import logger
-from model import EfficientDet
+from model import EfficientDet, EfficientDetD3
 from train import train
 from utils import (CosineLRScheduler, DetectionLoss, ExponentialMovingAverage)
 from utils.utils import count_parameters, init_seed
@@ -24,7 +26,7 @@ def parse_args():
     parser.add_argument('--cuda', dest='cuda', action='store_true')
     parser.add_argument('--cpu', dest='cuda', action='store_false')
     parser.add_argument('--device', type=int, default=0)
-    parser.set_defaults(cuda=True)
+    parser.set_defaults(cuda=False)
 
     arguments = parser.parse_args()
     return arguments
@@ -64,6 +66,16 @@ def main(args):
 
     model = EfficientDet.from_pretrained(args.model).to(device) \
         if args.pretrained else EfficientDet.from_name(args.model).to(device)
+    model_pnames = '\n'.join(sorted([n+': ('+', '.join([str(p.size(i))
+                                                       for i in range(p.ndim)])+')'
+                                    for n,p in model.named_parameters()]))
+    model = EfficientDetD3.from_pretrained().to(device) \
+        if args.pretrained else EfficientDetD3.from_name().to(device)
+    model2_pnames = '\n'.join(sorted([n+': ('+', '.join([str(p.size(i))
+                                                         for i in range(p.ndim)])+')'
+                                      for n,p in model.named_parameters()]))
+    print(model_pnames == model2_pnames)
+    #pdb.set_trace()
 
     if args.mode == 'trainval':
         logger("Model's trainable parameters: {}".format(count_parameters(model)))
@@ -90,6 +102,39 @@ def main(args):
                 ema_decay.resume(model)
 
     elif args.mode == 'eval':
+        #a,b = model(torch.randn(1,3,896,896))
+        #for i in range(5):
+        #    print(a[i].size(), b[i].size())
+        
+        import numpy as np
+        import tvm
+        import tvm.target
+        import tvm.contrib.ndk
+        from tvm import relay
+        
+        model = model.eval()
+        input_shape = [1, 3, 896, 896]
+        input_data = torch.randn(input_shape)
+        scripted_model = torch.jit.trace(model, input_data).eval()
+        
+        input_name = "input0"
+        shape_list = [(input_name, input_shape)]
+        mod, params = relay.frontend.from_pytorch(scripted_model, shape_list)
+        
+        target = tvm.target.arm_cpu("aarch64")
+        target_host = "llvm -mtriple=aarch64-linux-android27"
+        pdb.set_trace()
+        with tvm.transform.PassContext(opt_level=3):
+            lib = relay.build(mod, target=target, target_host=target_host, params=params)
+        
+        pdb.set_trace()
+        ret = lib.export_library("deploy_lib.so", tvm.contrib.ndk.create_shared)
+        #with open("deploy_graph.json", "w") as fo:
+        #    fo.write(graph.json())
+        with open("deploy_param.params", "wb") as fo:
+            fo.write(relay.save_param_dict(params))
+        
+        pdb.set_trace()
         validate(model, device)
 
 
