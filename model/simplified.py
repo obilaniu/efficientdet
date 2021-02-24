@@ -4,6 +4,7 @@ from pathlib import Path
 
 import math, pdb, os, sys, time
 import numpy as np
+
 import torch
 import torch.nn as nn
 from torch import nn
@@ -11,8 +12,6 @@ from torch.nn import functional as F
 
 import config as cfg
 from log.logger import logger
-from model.backbone import EfficientNet
-from model.bifpn import BiFPN
 from model.head import HeadNet
 from utils.utils import download_model_weights
 from utils.tools import variance_scaling_
@@ -47,6 +46,30 @@ class ConvModule(nn.Module):
         x = self.bn(x)
         return x
 
+
+class DepthWiseSeparableConvModuleB3(nn.Module):
+    """ DepthWise Separable Convolution with BatchNorm and ReLU activation """
+    def __init__(self, in_channels, out_channels, bath_norm=True, relu=True, bias=False):
+        super().__init__()
+        self.conv_dw = nn.Conv2d(in_channels, in_channels, kernel_size=3,
+                                 padding=1, groups=in_channels, bias=False)
+        self.conv_pw = nn.Conv2d(in_channels, out_channels, kernel_size=1,
+                                 padding=0, bias=bias)
+
+        self.bn = None if not bath_norm else \
+            nn.BatchNorm2d(out_channels, eps=1e-3, momentum=0.01)
+        self.act = None if not relu else Swish()
+
+    def forward(self, x):
+        x = self.conv_dw(x)
+        x = self.conv_pw(x)
+        if self.bn is not None:
+            x = self.bn(x)
+        if self.act is not None:
+            x = self.act(x)
+        return x
+
+
 class MaxPool2dSamePadB3(nn.MaxPool2d):
     """ TensorFlow-like 2D Max Pooling with same padding """
 
@@ -80,6 +103,118 @@ class MaxPool2dSamePadB3(nn.MaxPool2d):
         x = F.max_pool2d(x, self.kernel_size, self.stride,
                          self.padding, self.dilation, self.ceil_mode)
         return x
+
+
+class BiFPNB3(nn.Module):
+    """
+    BiFPN block.
+    Depending on its order, it either accepts
+    seven feature maps (if this block is the first block in FPN) or
+    otherwise five feature maps from the output of the previous BiFPN block
+    """
+
+    EPS: float = 1e-04
+    REDUCTION_RATIO: int = 2
+
+    def __init__(self, n_channels):
+        super().__init__()
+
+        self.conv_4_td = DepthWiseSeparableConvModuleB3(n_channels, n_channels, relu=False)
+        self.conv_5_td = DepthWiseSeparableConvModuleB3(n_channels, n_channels, relu=False)
+        self.conv_6_td = DepthWiseSeparableConvModuleB3(n_channels, n_channels, relu=False)
+
+        self.weights_4_td = nn.Parameter(torch.ones(2))
+        self.weights_5_td = nn.Parameter(torch.ones(2))
+        self.weights_6_td = nn.Parameter(torch.ones(2))
+
+        self.conv_3_out = DepthWiseSeparableConvModuleB3(n_channels, n_channels, relu=False)
+        self.conv_4_out = DepthWiseSeparableConvModuleB3(n_channels, n_channels, relu=False)
+        self.conv_5_out = DepthWiseSeparableConvModuleB3(n_channels, n_channels, relu=False)
+        self.conv_6_out = DepthWiseSeparableConvModuleB3(n_channels, n_channels, relu=False)
+        self.conv_7_out = DepthWiseSeparableConvModuleB3(n_channels, n_channels, relu=False)
+
+        self.weights_3_out = nn.Parameter(torch.ones(2))
+        self.weights_4_out = nn.Parameter(torch.ones(3))
+        self.weights_5_out = nn.Parameter(torch.ones(3))
+        self.weights_6_out = nn.Parameter(torch.ones(3))
+        self.weights_7_out = nn.Parameter(torch.ones(2))
+
+        self.upsample = lambda x: F.interpolate(x, scale_factor=self.REDUCTION_RATIO)
+        self.downsample = MaxPool2dSamePadB3(self.REDUCTION_RATIO + 1, self.REDUCTION_RATIO, extra_pad=(1,1))
+
+        self.act = Swish()
+
+    def forward(self, features):
+        if len(features) == 5:
+            p_3, p_4, p_5, p_6, p_7 = features
+            p_4_2, p_5_2 = None, None
+        else:
+            p_3, p_4, p_4_2, p_5, p_5_2, p_6, p_7 = features
+
+        # Top Down Path
+        p_6_td = self.conv_6_td(
+            self._fuse_features(
+                weights=self.weights_6_td,
+                features=[p_6, self.upsample(p_7)]
+            )
+        )
+        p_5_td = self.conv_5_td(
+            self._fuse_features(
+                weights=self.weights_5_td,
+                features=[p_5, self.upsample(p_6_td)]
+            )
+        )
+        p_4_td = self.conv_4_td(
+            self._fuse_features(
+                weights=self.weights_4_td,
+                features=[p_4, self.upsample(p_5_td)]
+            )
+        )
+
+        p_4_in = p_4 if p_4_2 is None else p_4_2
+        p_5_in = p_5 if p_5_2 is None else p_5_2
+
+        # Out
+        p_3_out = self.conv_3_out(
+            self._fuse_features(
+                weights=self.weights_3_out,
+                features=[p_3, self.upsample(p_4_td)]
+            )
+        )
+        p_4_out = self.conv_4_out(
+            self._fuse_features(
+                weights=self.weights_4_out,
+                features=[p_4_in, p_4_td, self.downsample(p_3_out)]
+            )
+        )
+        p_5_out = self.conv_5_out(
+            self._fuse_features(
+                weights=self.weights_5_out,
+                features=[p_5_in, p_5_td, self.downsample(p_4_out)]
+            )
+        )
+        p_6_out = self.conv_6_out(
+            self._fuse_features(
+                weights=self.weights_6_out,
+                features=[p_6, p_6_td, self.downsample(p_5_out)]
+            )
+        )
+        p_7_out = self.conv_7_out(
+            self._fuse_features(
+                weights=self.weights_7_out,
+                features=[p_7, self.downsample(p_6_out)]
+            )
+        )
+
+        return (p_3_out, p_4_out, p_5_out, p_6_out, p_7_out)
+
+    def _fuse_features(self, weights, features):
+        weights = F.relu(weights)
+        num = sum([w * f for w, f in zip(weights, features)])
+        det = sum(weights) + self.EPS
+        x = self.act(num / det)
+        return x
+
 
 class ChannelAdjusterB3(nn.Module):
     """ Adjusts number of channels before BiFPN via 1x1 conv layers
@@ -364,15 +499,15 @@ class EfficientDetD3(nn.Module):
         self.NUM_CLASSES= 90
         self.backbone   = EfficientNetB3()
         self.adjuster   = ChannelAdjusterB3(self.backbone.get_channels_list(), self.W_BIFPN)
-        self.bifpn      = nn.Sequential(*[BiFPN(self.W_BIFPN) for _ in range(self.D_BIFPN)])
+        self.bifpn      = nn.Sequential(*[BiFPNB3(self.W_BIFPN) for _ in range(self.D_BIFPN)])
         self.regresser  = HeadNet(n_features=self.W_BIFPN, out_channels=self.NUM_ANCHORS*4,                n_repeats=self.D_CLASS)
         self.classifier = HeadNet(n_features=self.W_BIFPN, out_channels=self.NUM_ANCHORS*self.NUM_CLASSES, n_repeats=self.D_CLASS)
 
     def forward(self, x):
         x = self.backbone(x)
         x = self.adjuster(x)
-        return x
         x = self.bifpn(x)
+        return x
         cls_outputs = self.classifier(x)
         box_outputs = self.regresser(x)
         return cls_outputs, box_outputs

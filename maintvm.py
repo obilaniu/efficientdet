@@ -37,10 +37,6 @@ def parse_args(args=sys.argv[1:]):
 
 def main(args):
     # TVM_NDK_CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android27-clang++"
-    os.environ["TVM_NDK_CC"] = os.path.join(
-        os.environ["ANDROID_NDK_HOME"], "toolchains", "llvm", "prebuilt",
-        "linux-x86_64", "bin", "aarch64-linux-android27-clang++"
-    )
     assert "TVM_NDK_CC" in os.environ
     
     device = torch.device('cuda:{}'.format(args.device)) \
@@ -119,10 +115,6 @@ def main(args):
     print(out3.shape)
     out4 = module.get_output(4)
     print(out4.shape)
-    out5 = module.get_output(5)
-    print(out5.shape)
-    out6 = module.get_output(6)
-    print(out6.shape)
     
     print("Benchmarking inference...")
     ftimer = module.module.time_evaluator("run", ctx, number=1, repeat=10)
