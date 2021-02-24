@@ -1,18 +1,16 @@
 from itertools import chain
 from functools import partial
-from pathlib import Path
+from pathlib   import Path
 
 import math, pdb, os, sys, time
 import numpy as np
 
 import torch
-import torch.nn as nn
 from torch import nn
 from torch.nn import functional as F
 
 import config as cfg
 from log.logger import logger
-from model.head import HeadNet
 from utils.utils import download_model_weights
 from utils.tools import variance_scaling_
 
@@ -103,6 +101,39 @@ class MaxPool2dSamePadB3(nn.MaxPool2d):
         x = F.max_pool2d(x, self.kernel_size, self.stride,
                          self.padding, self.dilation, self.ceil_mode)
         return x
+
+
+class HeadNetB3(nn.Module):
+    """ Box Regression and Classification Nets """
+    def __init__(self, n_features, out_channels, n_repeats, num_levels=5):
+        super().__init__()
+        self.convs = nn.ModuleList()
+        self.bns = nn.ModuleList()
+
+        for _ in range(n_repeats):
+            self.convs.append(DepthWiseSeparableConvModuleB3(n_features, n_features,
+                                                             bath_norm=False, relu=False))
+            bn_levels = nn.ModuleList()
+            for _ in range(num_levels):
+                bn = nn.BatchNorm2d(n_features, eps=1e-3, momentum=0.01)
+                bn_levels.append(bn)
+            self.bns.append(bn_levels)
+
+        self.act = Swish()
+        self.head = DepthWiseSeparableConvModuleB3(n_features, out_channels,
+                                                   bath_norm=False, relu=False, bias=True)
+
+    def forward(self, inputs):
+        outs = []
+
+        for f_idx, f_map in enumerate(inputs):
+            for conv, bn in zip(self.convs, self.bns):
+                f_map = conv(f_map)
+                f_map = bn[f_idx](f_map)
+                f_map = self.act(f_map)
+            outs.append(self.head(f_map))
+
+        return tuple(outs)
 
 
 class BiFPNB3(nn.Module):
@@ -500,17 +531,16 @@ class EfficientDetD3(nn.Module):
         self.backbone   = EfficientNetB3()
         self.adjuster   = ChannelAdjusterB3(self.backbone.get_channels_list(), self.W_BIFPN)
         self.bifpn      = nn.Sequential(*[BiFPNB3(self.W_BIFPN) for _ in range(self.D_BIFPN)])
-        self.regresser  = HeadNet(n_features=self.W_BIFPN, out_channels=self.NUM_ANCHORS*4,                n_repeats=self.D_CLASS)
-        self.classifier = HeadNet(n_features=self.W_BIFPN, out_channels=self.NUM_ANCHORS*self.NUM_CLASSES, n_repeats=self.D_CLASS)
+        self.regresser  = HeadNetB3(n_features=self.W_BIFPN, out_channels=self.NUM_ANCHORS*4,                n_repeats=self.D_CLASS)
+        self.classifier = HeadNetB3(n_features=self.W_BIFPN, out_channels=self.NUM_ANCHORS*self.NUM_CLASSES, n_repeats=self.D_CLASS)
 
     def forward(self, x):
         x = self.backbone(x)
         x = self.adjuster(x)
         x = self.bifpn(x)
-        return x
         cls_outputs = self.classifier(x)
         box_outputs = self.regresser(x)
-        return cls_outputs, box_outputs
+        return cls_outputs + box_outputs
 
     @staticmethod
     def from_name(WEIGHTS_PATH=Path('./weights')):
